@@ -166,6 +166,8 @@ async def socket_client(
                 except Exception as e:
                     logger.error(f"Error in socket reader: {e}")
                     raise
+                finally:
+                    await stream.aclose()
 
             async def socket_writer():
                 """Reads messages from write_stream and sends them over the socket."""
@@ -184,6 +186,8 @@ async def socket_client(
                 except Exception as e:
                     logger.error(f"Error in socket writer: {e}")
                     raise
+                finally:
+                    await stream.aclose()
 
             async with anyio.create_task_group() as tg:
                 # Start the listener task

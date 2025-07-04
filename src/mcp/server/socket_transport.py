@@ -128,12 +128,11 @@ async def socket_server(
             try:
                 yield read_stream, write_stream
             finally:
-                await stream.aclose()
                 tg.cancel_scope.cancel()
+                await stream.aclose()
 
-    except Exception:
+    finally:
         await read_stream.aclose()
         await write_stream.aclose()
         await read_stream_writer.aclose()
         await write_stream_reader.aclose()
-        raise
