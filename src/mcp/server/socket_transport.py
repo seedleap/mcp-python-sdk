@@ -102,8 +102,14 @@ async def socket_server(
                                 await read_stream_writer.send(exc)
                                 continue
             except anyio.ClosedResourceError:
+                logger.info("Socket reader closed")
                 await anyio.lowlevel.checkpoint()
+                logger.info("Socket reader checkpointed")
+            except Exception as e:
+                logger.error(f"Error in socket reader: {e}")
+                raise
             finally:
+                logger.info("=== Closing stream ===")
                 await stream.aclose()
 
         async def socket_writer():
@@ -117,22 +123,37 @@ async def socket_server(
                         data = (json + "\n").encode(encoding, encoding_error_handler)
                         await stream.send(data)
             except anyio.ClosedResourceError:
+                logger.info("Socket writer closed")
                 await anyio.lowlevel.checkpoint()
+                logger.info("Socket writer checkpointed")
+            except Exception as e:
+                logger.error(f"Error in socket writer: {e}")
+                raise
             finally:
+                logger.info("=== Closing stream ===")
                 await stream.aclose()
 
         async with anyio.create_task_group() as tg:
+            logger.info("=== Starting task group ===")
             tg.start_soon(socket_reader)
             tg.start_soon(socket_writer)
 
             try:
+                logger.info("=== Starting yield ===")
                 yield read_stream, write_stream
             finally:
+                logger.info("=== Starting cleanup ===")
+                logger.info("=== Cancelling task group ===")
                 tg.cancel_scope.cancel()
+                logger.info("=== Closing stream ===")
                 await stream.aclose()
+                logger.info("=== Stream closed ===")
+                logger.info("=== Cleanup completed ===")
 
     finally:
+        logger.info("=== Starting final cleanup ===")
         await read_stream.aclose()
         await write_stream.aclose()
         await read_stream_writer.aclose()
         await write_stream_reader.aclose()
+        logger.info("=== Final cleanup completed ===")

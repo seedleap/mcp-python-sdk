@@ -134,6 +134,7 @@ async def socket_client(
                         await listener.serve(handle_connection)
                 except anyio.get_cancelled_exc_class():
                     # Normal cancellation, just exit
+                    logger.info("Listener cancelled")
                     pass
                 except Exception as e:
                     logger.error(f"Error in listener: {e}")
@@ -159,15 +160,20 @@ async def socket_client(
                                     session_message = SessionMessage(message)
                                     await read_stream_writer.send(session_message)
                                 except Exception as exc:
+                                    logger.error(f"Error in socket reader: {exc}")
                                     await read_stream_writer.send(exc)
                                     continue
                 except anyio.ClosedResourceError:
+                    logger.info("Socket reader closed")
                     await anyio.lowlevel.checkpoint()
+                    logger.info("Socket reader checkpointed")
                 except Exception as e:
                     logger.error(f"Error in socket reader: {e}")
                     raise
                 finally:
+                    logger.info("=== Socket reader cleanup: closing stream ===")
                     await stream.aclose()
+                    logger.info("=== Socket reader cleanup completed ===")
 
             async def socket_writer():
                 """Reads messages from write_stream and sends them over the socket."""
@@ -182,14 +188,19 @@ async def socket_client(
                             )
                             await stream.send(data)
                 except anyio.ClosedResourceError:
+                    logger.info("Socket writer closed")
                     await anyio.lowlevel.checkpoint()
+                    logger.info("Socket writer checkpointed")
                 except Exception as e:
                     logger.error(f"Error in socket writer: {e}")
                     raise
                 finally:
+                    logger.info("=== Socket writer cleanup: closing stream ===")
                     await stream.aclose()
+                    logger.info("=== Socket writer cleanup completed ===")
 
             async with anyio.create_task_group() as tg:
+                logger.info("=== Starting task group ===")
                 # Start the listener task
                 tg.start_soon(run_listener)
 
@@ -203,9 +214,12 @@ async def socket_client(
 
                 try:
                     async with process, stream:
+                        logger.info("Yielding streams to caller")
                         yield read_stream, write_stream
                 finally:
                     # Cancel all tasks and clean up
+                    logger.info("=== Starting cleanup ===")
+                    logger.info("Stage 1: Cancelling task group")
                     tg.cancel_scope.cancel()
                     # Clean up process to prevent any dangling orphaned processes
                     try:
@@ -213,17 +227,32 @@ async def socket_client(
                     except ProcessLookupError:
                         # Process already exited, which is fine
                         pass
+
+                    logger.info("Stage 2: Closing streams")
                     await read_stream.aclose()
+                    logger.info("- read_stream closed")
                     await write_stream.aclose()
+                    logger.info("- write_stream closed")
                     await read_stream_writer.aclose()
+                    logger.info("- read_stream_writer closed")
                     await write_stream_reader.aclose()
+                    logger.info("- write_stream_reader closed")
+                    logger.info("All streams closed successfully")
+                    logger.info("=== Cleanup completed ===")
 
         finally:
             # Clean up process
+            logger.info("=== Starting process cleanup ===")
             if process.returncode is None:
+                logger.info(f"Terminating process {process.pid} in middle cleanup")
                 process.terminate()
+                logger.info("=== Process terminated ===")
             await process.aclose()
+            logger.info("=== Process cleanup completed ===")
 
     finally:
         # Clean up listener
+        logger.info("=== Starting listener cleanup ===")
         await listener.aclose()
+        logger.info("=== Listener cleanup completed ===")
+        logger.info("Socket client cleanup sequence completed")
