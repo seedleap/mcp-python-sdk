@@ -83,57 +83,76 @@ async def socket_server(
         if not stream:
             raise RuntimeError("Failed to connect to client")
 
-        async def socket_reader():
-            """Reads messages from the socket and forwards them to read_stream."""
-            try:
-                async with read_stream_writer:
-                    buffer = ""
-                    async for data in stream:
-                        text = data.decode(encoding, encoding_error_handler)
-                        lines = (buffer + text).split("\n")
-                        buffer = lines.pop()
-
-                        for line in lines:
-                            try:
-                                message = types.JSONRPCMessage.model_validate_json(line)
-                                session_message = SessionMessage(message)
-                                await read_stream_writer.send(session_message)
-                            except Exception as exc:
-                                await read_stream_writer.send(exc)
-                                continue
-            except anyio.ClosedResourceError:
-                await anyio.lowlevel.checkpoint()
-            finally:
-                await stream.aclose()
-
-        async def socket_writer():
-            """Reads messages from write_stream and sends them over the socket."""
-            try:
-                async with write_stream_reader:
-                    async for session_message in write_stream_reader:
-                        json = session_message.message.model_dump_json(
-                            by_alias=True, exclude_none=True
-                        )
-                        data = (json + "\n").encode(encoding, encoding_error_handler)
-                        await stream.send(data)
-            except anyio.ClosedResourceError:
-                await anyio.lowlevel.checkpoint()
-            finally:
-                await stream.aclose()
-
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(socket_reader)
-            tg.start_soon(socket_writer)
-
-            try:
-                yield read_stream, write_stream
-            finally:
-                await stream.aclose()
-                tg.cancel_scope.cancel()
-
-    except Exception:
+    except Exception as e:
+        logger.debug(f"----- Caught exception: {e} -----")
+        # Clean up streams if connection fails
+        logger.debug("----- Closing streams -----")
         await read_stream.aclose()
         await write_stream.aclose()
         await read_stream_writer.aclose()
         await write_stream_reader.aclose()
+        logger.debug("----- Streams closed -----")
         raise
+
+    async def socket_reader():
+        """Reads messages from the socket and forwards them to read_stream."""
+        try:
+            async with read_stream_writer:
+                buffer = ""
+                async for data in stream:
+                    text = data.decode(encoding, encoding_error_handler)
+                    lines = (buffer + text).split("\n")
+                    buffer = lines.pop()
+
+                    for line in lines:
+                        try:
+                            message = types.JSONRPCMessage.model_validate_json(line)
+                        except Exception as exc:
+                            await read_stream_writer.send(exc)
+                            continue
+
+                        session_message = SessionMessage(message)
+                        await read_stream_writer.send(session_message)
+        except anyio.ClosedResourceError:
+            logger.debug("----- Socket reader closed -----")
+            await anyio.lowlevel.checkpoint()
+            logger.debug("----- Socket reader checkpointed -----")
+        finally:
+            logger.debug("----- Socket reader finally -----")
+            await stream.aclose()
+
+    async def socket_writer():
+        """Reads messages from write_stream and sends them over the socket."""
+        try:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    json = session_message.message.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+                    data = (json + "\n").encode(encoding, encoding_error_handler)
+                    await stream.send(data)
+        except anyio.ClosedResourceError:
+            logger.debug("----- Socket writer closed -----")
+            await anyio.lowlevel.checkpoint()
+            logger.debug("----- Socket writer checkpointed -----")
+        finally:
+            logger.debug("----- Socket writer finally -----")
+            await stream.aclose()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(socket_reader)
+        tg.start_soon(socket_writer)
+
+        try:
+            yield read_stream, write_stream
+        finally:
+            logger.debug("----- Cleaning up -----")
+            tg.cancel_scope.cancel()
+            logger.debug("----- Closing streams -----")
+            # stream is closed by socket_reader and socket_writer
+            await read_stream.aclose()
+            await write_stream.aclose()
+            await read_stream_writer.aclose()
+            await write_stream_reader.aclose()
+            logger.debug("----- Streams closed -----")
+            logger.debug("----- Cleanup complete -----")

@@ -116,110 +116,130 @@ async def socket_client(
             stderr=errlog,
             cwd=server.cwd,
         )
+    except Exception as e:
+        logger.debug(f"----- Caught exception: {e} -----")
+        # Clean up listener
+        logger.debug("----- Closing listener -----")
+        await listener.aclose()
+        logger.debug("----- Listener closed -----")
+        # Clean up streams if process creation fails
+        logger.debug("----- Closing streams -----")
+        await read_stream.aclose()
+        await write_stream.aclose()
+        await read_stream_writer.aclose()
+        await write_stream_reader.aclose()
+        logger.debug("----- Streams closed -----")
+        raise
+
+    # Accept connection from the server with timeout
+    stream = None
+    connection_event = anyio.Event()
+
+    async def handle_connection(client_stream):
+        nonlocal stream
+        stream = client_stream
+        logger.info(f"Accepted connection from server")
+        connection_event.set()
+
+    async def run_listener():
+        try:
+            async with listener:
+                await listener.serve(handle_connection)
+        except anyio.get_cancelled_exc_class():
+            # Normal cancellation, just exit
+            logger.debug("----- Listener cancelled -----")
+            pass
+        except Exception as e:
+            logger.error(f"Error in listener: {e}")
+            raise
+        finally:
+            logger.debug("----- Listener finally -----")
+
+    async def socket_reader():
+        """Reads messages from the socket and forwards them to read_stream."""
+        try:
+            async with read_stream_writer:
+                buffer = ""
+                async for data in stream:
+                    text = data.decode(server.encoding, server.encoding_error_handler)
+                    lines = (buffer + text).split("\n")
+                    buffer = lines.pop()
+
+                    for line in lines:
+                        try:
+                            message = types.JSONRPCMessage.model_validate_json(line)
+                        except Exception as exc:
+                            await read_stream_writer.send(exc)
+                            continue
+
+                        session_message = SessionMessage(message)
+                        await read_stream_writer.send(session_message)
+        except anyio.ClosedResourceError:
+            logger.debug("----- Socket reader closed -----")
+            await anyio.lowlevel.checkpoint()
+            logger.debug("----- Socket reader checkpointed -----")
+        except Exception as e:
+            logger.error(f"Error in socket reader: {e}")
+            raise
+        finally:
+            logger.debug("----- Socket reader finally -----")
+
+    async def socket_writer():
+        """Reads messages from write_stream and sends them over the socket."""
+        try:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    json = session_message.message.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+                    data = (json + "\n").encode(
+                        server.encoding, server.encoding_error_handler
+                    )
+                    await stream.send(data)
+        except anyio.ClosedResourceError:
+            logger.debug("----- Socket writer closed -----")
+            await anyio.lowlevel.checkpoint()
+            logger.debug("----- Socket writer checkpointed -----")
+        except Exception as e:
+            logger.error(f"Error in socket writer: {e}")
+            raise
+        finally:
+            logger.debug("----- Socket writer finally -----")
+
+    async with (
+        anyio.create_task_group() as tg,
+        process,
+    ):
+        # Start the listener task
+        tg.start_soon(run_listener)
+
+        # Wait for connection with timeout
+        with anyio.fail_after(server.connection_timeout):
+            await connection_event.wait()
+
+        # Start reader and writer tasks
+        tg.start_soon(socket_reader)
+        tg.start_soon(socket_writer)
 
         try:
-            # Accept connection from the server with timeout
-            stream = None
-            connection_event = anyio.Event()
-
-            async def handle_connection(client_stream):
-                nonlocal stream
-                stream = client_stream
-                logger.info(f"Accepted connection from server")
-                connection_event.set()
-
-            async def run_listener():
-                try:
-                    async with listener:
-                        await listener.serve(handle_connection)
-                except anyio.get_cancelled_exc_class():
-                    # Normal cancellation, just exit
-                    pass
-                except Exception as e:
-                    logger.error(f"Error in listener: {e}")
-                    raise
-
-            async def socket_reader():
-                """Reads messages from the socket and forwards them to read_stream."""
-                try:
-                    async with read_stream_writer:
-                        buffer = ""
-                        async for data in stream:
-                            text = data.decode(
-                                server.encoding, server.encoding_error_handler
-                            )
-                            lines = (buffer + text).split("\n")
-                            buffer = lines.pop()
-
-                            for line in lines:
-                                try:
-                                    message = types.JSONRPCMessage.model_validate_json(
-                                        line
-                                    )
-                                    session_message = SessionMessage(message)
-                                    await read_stream_writer.send(session_message)
-                                except Exception as exc:
-                                    await read_stream_writer.send(exc)
-                                    continue
-                except anyio.ClosedResourceError:
-                    await anyio.lowlevel.checkpoint()
-                except Exception as e:
-                    logger.error(f"Error in socket reader: {e}")
-                    raise
-
-            async def socket_writer():
-                """Reads messages from write_stream and sends them over the socket."""
-                try:
-                    async with write_stream_reader:
-                        async for session_message in write_stream_reader:
-                            json = session_message.message.model_dump_json(
-                                by_alias=True, exclude_none=True
-                            )
-                            data = (json + "\n").encode(
-                                server.encoding, server.encoding_error_handler
-                            )
-                            await stream.send(data)
-                except anyio.ClosedResourceError:
-                    await anyio.lowlevel.checkpoint()
-                except Exception as e:
-                    logger.error(f"Error in socket writer: {e}")
-                    raise
-
-            async with anyio.create_task_group() as tg:
-                # Start the listener task
-                tg.start_soon(run_listener)
-
-                # Wait for connection with timeout
-                with anyio.fail_after(server.connection_timeout):
-                    await connection_event.wait()
-
-                # Start reader and writer tasks
-                tg.start_soon(socket_reader)
-                tg.start_soon(socket_writer)
-
-                try:
-                    async with process, stream:
-                        yield read_stream, write_stream
-                finally:
-                    # Cancel all tasks and clean up
-                    tg.cancel_scope.cancel()
-                    # Clean up process to prevent any dangling orphaned processes
-                    try:
-                        process.terminate()
-                    except ProcessLookupError:
-                        # Process already exited, which is fine
-                        pass
-                    await read_stream.aclose()
-                    await write_stream.aclose()
-                    await read_stream_writer.aclose()
-                    await write_stream_reader.aclose()
-
+            yield read_stream, write_stream
         finally:
-            # Clean up process
-            if process.returncode is None:
+            logger.debug("----- Cleaning up -----")
+            # Cancel all tasks and clean up
+            tg.cancel_scope.cancel()
+            # Clean up process to prevent any dangling orphaned processes
+            try:
+                logger.debug(f"----- Terminating process {process.pid} -----")
                 process.terminate()
-            await process.aclose()
-
-    finally:
-        # Clean up listener
-        await listener.aclose()
+                logger.debug(f"----- Process {process.pid} terminated -----")
+            except ProcessLookupError:
+                # Process already exited, which is fine
+                logger.debug(f"----- Process {process.pid} already exited -----")
+                pass
+            logger.debug("----- Closing streams -----")
+            await read_stream.aclose()
+            await write_stream.aclose()
+            await read_stream_writer.aclose()
+            await write_stream_reader.aclose()
+            logger.debug("----- Streams closed -----")
+            logger.debug("----- Cleanup complete -----")
