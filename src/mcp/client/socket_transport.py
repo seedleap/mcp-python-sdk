@@ -121,6 +121,7 @@ async def socket_client(
             # Accept connection from the server with timeout
             stream = None
             connection_event = anyio.Event()
+            shutdown_event = anyio.Event()
 
             async def handle_connection(client_stream):
                 nonlocal stream
@@ -167,8 +168,15 @@ async def socket_client(
                     logger.info("Socket reader closed")
                     await anyio.lowlevel.checkpoint()
                     logger.info("Socket reader checkpointed")
+                    # Signal that session is closing normally
+                    shutdown_event.set()
+                    return  # Exit normally
+                except anyio.get_cancelled_exc_class():
+                    logger.info("Socket reader cancelled")
+                    return  # Exit normally on cancellation
                 except Exception as e:
                     logger.error(f"Error in socket reader: {e}")
+                    shutdown_event.set()  # Signal shutdown on error too
                     raise
                 finally:
                     logger.info("=== Socket reader cleanup: closing stream ===")
@@ -191,18 +199,36 @@ async def socket_client(
                     logger.info("Socket writer closed")
                     await anyio.lowlevel.checkpoint()
                     logger.info("Socket writer checkpointed")
+                    # Signal that session is closing normally
+                    shutdown_event.set()
+                    return  # Exit normally
+                except anyio.get_cancelled_exc_class():
+                    logger.info("Socket writer cancelled")
+                    return  # Exit normally on cancellation
                 except Exception as e:
                     logger.error(f"Error in socket writer: {e}")
+                    shutdown_event.set()  # Signal shutdown on error too
                     raise
                 finally:
                     logger.info("=== Socket writer cleanup: closing stream ===")
                     await stream.aclose()
                     logger.info("=== Socket writer cleanup completed ===")
 
+            async def shutdown_monitor(tg):
+                """Monitor for shutdown event and cancel task group when needed."""
+                await shutdown_event.wait()
+                logger.info("Shutdown event received, cancelling task group")
+                # Give a small delay to let cleanup messages be logged
+                await anyio.sleep(0.1)
+                tg.cancel_scope.cancel()
+
             async with anyio.create_task_group() as tg:
                 logger.info("=== Starting task group ===")
                 # Start the listener task
                 tg.start_soon(run_listener)
+
+                # Start the shutdown monitor
+                tg.start_soon(shutdown_monitor, tg)
 
                 # Wait for connection with timeout
                 with anyio.fail_after(server.connection_timeout):
@@ -213,22 +239,38 @@ async def socket_client(
                 tg.start_soon(socket_writer)
 
                 try:
-                    async with process, stream:
-                        logger.info("Yielding streams to caller")
-                        yield read_stream, write_stream
+                    logger.info("Yielding streams to caller")
+                    yield read_stream, write_stream
                 finally:
                     # Cancel all tasks and clean up
                     logger.info("=== Starting cleanup ===")
                     logger.info("Stage 1: Cancelling task group")
                     tg.cancel_scope.cancel()
+
+                    logger.info("Stage 2: Terminating process")
                     # Clean up process to prevent any dangling orphaned processes
                     try:
-                        process.terminate()
+                        if process.returncode is None:
+                            logger.info("Process still running, terminating...")
+                            process.terminate()
+                        else:
+                            logger.info(
+                                f"Process already exited with code {process.returncode}"
+                            )
                     except ProcessLookupError:
-                        # Process already exited, which is fine
-                        pass
+                        logger.info("Process already exited (ProcessLookupError)")
+                    except Exception as e:
+                        logger.warning(f"Error terminating process: {e}")
 
-                    logger.info("Stage 2: Closing streams")
+                    logger.info("Stage 3: Closing socket stream")
+                    if stream:
+                        try:
+                            await stream.aclose()
+                            logger.info("Socket stream closed")
+                        except Exception as e:
+                            logger.warning(f"Error closing socket stream: {e}")
+
+                    logger.info("Stage 4: Closing streams")
                     await read_stream.aclose()
                     logger.info("- read_stream closed")
                     await write_stream.aclose()
