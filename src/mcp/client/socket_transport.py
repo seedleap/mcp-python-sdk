@@ -91,6 +91,8 @@ async def socket_client(
         OSError: If process startup fails
         Exception: For other errors
     """
+    logger.debug("----- Socket client started -----")
+
     read_stream: MemoryObjectReceiveStream[SessionMessage | Exception]
     read_stream_writer: MemoryObjectSendStream[SessionMessage | Exception]
 
@@ -206,10 +208,7 @@ async def socket_client(
         finally:
             logger.debug("----- Socket writer finally -----")
 
-    async with (
-        anyio.create_task_group() as tg,
-        process,
-    ):
+    async with anyio.create_task_group() as tg:
         # Start the listener task
         tg.start_soon(run_listener)
 
@@ -233,13 +232,15 @@ async def socket_client(
                 process.terminate()
                 logger.debug(f"----- Process {process.pid} terminated -----")
             except ProcessLookupError:
-                # Process already exited, which is fine
                 logger.debug(f"----- Process {process.pid} already exited -----")
-                pass
+
             logger.debug("----- Closing streams -----")
             await read_stream.aclose()
             await write_stream.aclose()
             await read_stream_writer.aclose()
             await write_stream_reader.aclose()
             logger.debug("----- Streams closed -----")
+
             logger.debug("----- Cleanup complete -----")
+
+    logger.debug("----- Socket client exited -----")

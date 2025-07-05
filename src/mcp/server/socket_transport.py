@@ -51,6 +51,8 @@ async def socket_server(
     Raises:
         ValueError: If port is 0
     """
+    logger.debug("----- Socket server started -----")
+
     if port == 0:
         raise ValueError(
             "Port cannot be 0 when connecting to client. A specific port must be provided."
@@ -156,3 +158,5 @@ async def socket_server(
             await write_stream_reader.aclose()
             logger.debug("----- Streams closed -----")
             logger.debug("----- Cleanup complete -----")
+
+    logger.debug("----- Socket server exited -----")
