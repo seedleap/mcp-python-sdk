@@ -176,7 +176,8 @@ async def socket_client(
                     return  # Exit normally on cancellation
                 except Exception as e:
                     logger.error(f"Error in socket reader: {e}")
-                    shutdown_event.set()  # Signal shutdown on error too
+                    # Don't set shutdown_event on unexpected errors to avoid
+                    # interfering with exception propagation
                     raise
                 finally:
                     logger.info("=== Socket reader cleanup: closing stream ===")
@@ -207,7 +208,8 @@ async def socket_client(
                     return  # Exit normally on cancellation
                 except Exception as e:
                     logger.error(f"Error in socket writer: {e}")
-                    shutdown_event.set()  # Signal shutdown on error too
+                    # Don't set shutdown_event on unexpected errors to avoid
+                    # interfering with exception propagation
                     raise
                 finally:
                     logger.info("=== Socket writer cleanup: closing stream ===")
@@ -241,6 +243,16 @@ async def socket_client(
                 try:
                     logger.info("Yielding streams to caller")
                     yield read_stream, write_stream
+                except Exception as e:
+                    # For any exception from the yield block (including test failures),
+                    # cancel the task group immediately to prevent ExceptionGroup wrapping
+                    logger.info(
+                        f"Exception in yield block: {type(e).__name__}, cancelling task group"
+                    )
+                    tg.cancel_scope.cancel()
+                    # Let tasks complete their cancellation
+                    await anyio.sleep(0.01)
+                    raise
                 finally:
                     # Cancel all tasks and clean up
                     logger.info("=== Starting cleanup ===")
