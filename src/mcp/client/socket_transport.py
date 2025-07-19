@@ -52,8 +52,8 @@ class SocketServerParameters(BaseModel):
     encoding: str = "utf-8"
     """The text encoding used when sending/receiving messages."""
 
-    encoding_error_handler: str = "strict"
-    """The text encoding error handler."""
+    encoding_error_handler: str = "replace"
+    """The text encoding error handler. Defaults to 'replace' to handle incomplete UTF-8 sequences."""
 
     connection_timeout: float = Field(default=5.0)
     """Timeout in seconds for connection acceptance."""
@@ -163,7 +163,17 @@ async def socket_client(
             async with read_stream_writer:
                 buffer = ""
                 async for data in stream:
-                    text = data.decode(server.encoding, server.encoding_error_handler)
+                    try:
+                        text = data.decode(
+                            server.encoding, server.encoding_error_handler
+                        )
+                    except UnicodeDecodeError as e:
+                        logger.warning(
+                            f"Failed to decode data: {e}. Using replacement character."
+                        )
+                        # Try again with 'replace' handler if the current handler failed
+                        text = data.decode(server.encoding, "replace")
+
                     lines = (buffer + text).split("\n")
                     buffer = lines.pop()
 
@@ -194,9 +204,17 @@ async def socket_client(
                     json = session_message.message.model_dump_json(
                         by_alias=True, exclude_none=True
                     )
-                    data = (json + "\n").encode(
-                        server.encoding, server.encoding_error_handler
-                    )
+                    try:
+                        data = (json + "\n").encode(
+                            server.encoding, server.encoding_error_handler
+                        )
+                    except UnicodeEncodeError as e:
+                        logger.warning(
+                            f"Failed to encode message: {e}. Using replacement character."
+                        )
+                        # Try again with 'replace' handler if the current handler failed
+                        data = (json + "\n").encode(server.encoding, "replace")
+
                     await stream.send(data)
         except anyio.ClosedResourceError:
             logger.debug("----- Socket writer closed -----")

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 async def echo_tool(text: str) -> str:
     """
     A simple echo tool that returns the input text.
+    Also verifies text encoding and logs any potential issues.
 
     Args:
         text: The text to echo back
@@ -40,7 +41,32 @@ async def echo_tool(text: str) -> str:
     Returns:
         The same text that was provided
     """
-    logger.info(f"Echo tool called with: {text}")
+    logger.info(f"Echo tool received: {text!r}")
+
+    # Test encoding/decoding roundtrip
+    try:
+        # Try encoding with strict handler first
+        encoded = text.encode("utf-8", "strict")
+        decoded = encoded.decode("utf-8", "strict")
+        if decoded != text:
+            logger.warning(
+                f"Text was modified in strict encode/decode roundtrip! "
+                f"Original: {text!r}, After roundtrip: {decoded!r}"
+            )
+    except UnicodeError as e:
+        logger.warning(f"Strict encode/decode failed: {e}")
+
+        # Try with replace handler
+        try:
+            encoded = text.encode("utf-8", "replace")
+            decoded = encoded.decode("utf-8", "replace")
+            logger.info(
+                f"Successfully handled problematic text with 'replace' handler. "
+                f"Original: {text!r}, After roundtrip: {decoded!r}"
+            )
+        except UnicodeError as e:
+            logger.error(f"Even replace handler failed: {e}")
+
     return text
 
 

@@ -109,12 +109,29 @@ async def main(host: str = "127.0.0.1", port: int = 0, log_level: str = "INFO"):
                         "Hello from socket transport!",
                         "Testing special chars: 世界, мир, ♥",
                         "Testing long message: " + "x" * 1000,
+                        # Add test cases for encoding/decoding error handling
+                        "Testing incomplete UTF-8: "
+                        + "测试"
+                        + b"\xe5\x8f\xaf".decode("utf-8", "replace"),
+                        "Testing invalid UTF-8: "
+                        + "错误"
+                        + b"\xff\xfe\xfd".decode("utf-8", "replace"),
+                        # Test edge cases
+                        "Testing null bytes: \x00\x01\x02",
+                        "Testing control chars: \n\r\t\b",
                     ]
 
                     for msg in messages:
                         try:
                             result = await session.call_tool("echo_tool", {"text": msg})
                             logger.info(f"Echo result: {result}")
+                            # Verify the echoed message matches the input
+                            if result.structuredContent["result"] != msg:
+                                logger.warning(
+                                    "Message was modified during transport! "
+                                    f"Original: {msg!r}, "
+                                    f"Received: {result.structuredContent['result']!r}"
+                                )
                         except McpError as e:
                             logger.error(f"Tool call failed: {e}")
 
